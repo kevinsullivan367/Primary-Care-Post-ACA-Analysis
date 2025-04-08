@@ -1,0 +1,353 @@
+---
+title: "MPP Capstone Data Analysis"
+author: "Kevin Sullivan"
+date: '2025-02-26'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(skimr)
+library(foreign)
+library(ggplot2)
+library(GGally)
+library(naniar)
+library(kableExtra)
+library(summarytools)
+library(stargazer)
+library(gtsummary)
+library(tidyr)
+```
+
+```{r}
+# Read in MEPS Data Previous 2017
+MEPS_2005 = read.xport("h97.ssp")
+MEPS_2006 = read.xport("h105.ssp")
+MEPS_2007 = read.xport("h113.ssp")
+MEPS_2008 = read.xport("h121.ssp")
+MEPS_2009 = read.xport("h129.ssp")
+MEPS_2010 = read.xport("h138.ssp")
+MEPS_2011 = read.xport("h147.ssp")
+MEPS_2012 = read.xport("h155.ssp")
+MEPS_2013 = read.xport("h163.ssp")
+MEPS_2014 = read.xport("h171.ssp")
+MEPS_2015 = read.xport("h181.ssp")
+MEPS_2016 = read.xport("h192.ssp")
+```
+
+```{r}
+# Read in MEPS Data After 2017
+MEPS_2017 = read.csv("h201.csv")
+MEPS_2018 = read.csv("h209.csv")
+MEPS_2019 = read.csv("h216.csv")
+MEPS_2020 = read.csv("h224.csv")
+MEPS_2021 = read.csv("h233.csv")
+MEPS_2022 = read.csv("MEPS_2022.csv")
+```
+
+**Preprocessing for diff-in-diff (Data Cleaning, Merging, Variable Creation)**
+
+
+ Variables of Interest 
+
+ Outcome Variables: OBDRV = # of doctor visits, HAVEUS = indicator if respondent has a usual source of care, ADRTCR = made appointment for routine care
+ 
+ Treatment and Control Groups: MCDEV (1 if has medicaid 0 else), 1 = treatment 0 = control
+ 
+ Time = 2014 (Medicaid expansion)
+ 
+ Pre = Years before 2014
+ 
+ Post = Years after 2014
+ 
+ so ADRTCR42, HAVEUS42 is consistent across all years
+
+ MCDEV, OBDRV changes by year
+
+```{r}
+# Write Function to Clean Data, Select Desired Variables, and Create Necessary diff-in-diff variables
+meps_list = list(
+  MEPS_2005, MEPS_2006, MEPS_2007, MEPS_2008, MEPS_2009, MEPS_2010, MEPS_2011, MEPS_2012,
+  MEPS_2013, MEPS_2014, MEPS_2015, MEPS_2016, MEPS_2017, MEPS_2018, MEPS_2019, MEPS_2020,
+  MEPS_2021, MEPS_2022
+)
+clean_meps = function(df, year) {
+  
+  df = df %>%
+    select(
+      DUPERSID, 
+      starts_with("OBDRV"),  # Doctor visits
+      starts_with("HAVEUS"), # Usual source of care
+      starts_with("MCDEV"),  # Medicaid enrollment
+      starts_with("ADRTC"),  # Appointment for Routine Care
+      starts_with("AGE"),    # Age
+      starts_with("TTLP"),   # Income
+      starts_with("RACE"),   # Race/Ethnicity
+      starts_with("SEX"),    # Gender
+      starts_with("EDUC"),   # Education
+      starts_with("EMPST"), # Employment status
+      starts_with("REGION"),  # Geographic region
+      starts_with("ADBMI")  # BMI
+    )
+  
+  # Remove year suffixes 
+  colnames(df) = gsub("([A-Za-z]+)[0-9]+", "\\1", colnames(df))
+
+  df = df[, !duplicated(colnames(df))]
+
+  # Add year variable
+  df = df %>%
+    mutate(YEAR = year)
+
+  # Define Treatment Group based on Medicaid coverage
+  if ("MCDEV" %in% colnames(df)) {
+    df = df %>%
+      mutate(Treatment_Group = ifelse(MCDEV == 1, 1, 0))  
+  }
+
+  # Create Pre/Post Expansion Indicator
+  df = df %>%
+    mutate(Pre_Post = ifelse(YEAR < 2014, "Pre", "Post"))  
+
+  # Ensure DUPERSID is a character
+  df = df %>%
+    mutate(DUPERSID = as.character(DUPERSID))
+  
+  return(df)
+}
+
+meps_cleaned_list = lapply(2005:2022, function(year) clean_meps(meps_list[[year - 2004]], year))
+
+meps_data = bind_rows(meps_cleaned_list)
+
+meps_data = meps_data %>%
+  mutate(
+    HAVEUS = ifelse(HAVEUS == 1, 1, 0),  
+    ADRTCR = ifelse(ADRTCR == 1, 1, 0)     
+  )
+
+meps_data = meps_data %>%
+  select(c("DUPERSID", "OBDRV", "HAVEUS", "MCDEV", "ADRTCR", "AGEX", "TTLPX", "RACEVX", "RACEBX", "RACEAX", "RACEWX","SEX", "EDUCYR", "EMPST", "REGION", "YEAR", "Treatment_Group", "Pre_Post")) %>%
+  rename(Income = TTLPX) %>% 
+  mutate(
+    RACEVX = case_when(
+      RACEVX == 1 ~ "White",
+      RACEVX == 2 ~ "Black",
+      RACEVX == 4 ~ "Asian",
+      RACEVX == 3 | RACEVX == 5 | RACEVX == 6 ~ "Other",
+      is.na(RACEVX) & RACEBX == 1 ~ "Black",
+      is.na(RACEVX) & RACEWX == 1 ~ "White",
+      is.na(RACEVX) & RACEAX == 1 ~ "Asian",
+      TRUE ~ "Unknown"  
+    ),
+    REGION = case_when(
+      REGION == 1 ~ "Northeast",
+      REGION == 2 ~ "Midwest",
+      REGION == 3 ~ "South",
+      REGION == 4 ~ "West",
+      TRUE ~ "Unknown"   
+    )
+  )
+
+meps_data = meps_data %>%
+  select("DUPERSID", "OBDRV", "HAVEUS", "MCDEV", "ADRTCR", "AGEX", "Income", "RACEVX", "SEX", "EDUCYR", "EMPST", "REGION", "YEAR", "Treatment_Group", "Pre_Post") %>%
+  rename(ID = DUPERSID, Number_Doctor_Visits = OBDRV, Have_Usual_Source_of_Care = HAVEUS, Made_Appointment_for_Routine_Care = ADRTCR, Medicaid = MCDEV, Age = AGEX, Race = RACEVX, Sex = SEX, Years_of_Education = EDUCYR, Employment_Status = EMPST, Region = REGION, Year = YEAR) %>%
+  mutate( 
+    Medicaid = ifelse(Medicaid == 2, 0, Medicaid),
+    Sex = case_when(Sex == 1 ~ "Male",
+                    Sex == 2 ~ "Female")
+    )
+
+head(meps_data)
+```
+**EDA**
+
+```{r}
+# Percent Missing Data
+meps_missing_by_var = colMeans(is.na(meps_data)) * 100
+
+meps_missing_by_var
+
+```
+
+
+```{r}
+# Numeric Summary Stats Table
+
+stargazer(meps_data, type = "html", title = "Table 1: Numeric Descriptive Statistics", digits = 1, out = "table1.html", column.sep.width = "5pt")
+
+cat("<style>table { border-spacing: 10px; }</style>", file = "table1.html", append = TRUE)
+```
+
+```{r}
+# Categorical Summary Stats Table
+
+categorical_vars = meps_data %>% select(where(~is.factor(.) | is.character(.)))
+
+categorical_vars = categorical_vars %>% mutate(across(everything(), as.factor))
+
+dfSummary(categorical_vars) %>%
+  print(method = "browser")
+
+```
+
+
+**Graph Pre and Post Trends for Each Outcome Variable**
+
+```{r}
+trend_data = meps_data %>%
+  group_by(Year, Pre_Post, Treatment_Group) %>%
+  summarise(
+    Mean_doctor_visits = mean(Number_Doctor_Visits, na.rm = TRUE),
+    Mean_haveus = mean(Have_Usual_Source_of_Care, na.rm = TRUE),
+    Mean_appointment = mean(Made_Appointment_for_Routine_Care, na.rm = TRUE)
+  ) %>%
+  ungroup()
+
+head(trend_data)
+```
+```{r}
+# Graph for Doctor Visits
+
+ggplot(trend_data, aes(x = Year, y = Mean_doctor_visits, color = as.factor(Treatment_Group), linetype = Pre_Post)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Pre and Post Trends for Number of Doctor Visits",
+    x = "Year",
+    y = "Mean Number of Doctor Visits",
+    color = "Treatment Group",
+    linetype = "Pre/Post"
+  ) + 
+  scale_color_manual(
+    values = c("mediumblue", "deepskyblue1"),
+    labels = c("Non-Medicaid", "Medicaid")  # Labeling groups manually
+  ) +
+  geom_vline(xintercept = 2014, linetype = "dotted", color = "black", size = 0.5) +
+  geom_text(aes(x = 2014, y = -Inf, label = "Medicaid Expansion"), 
+            angle = 0, hjust = 0.46, vjust = -0.5, size = 3, color = "firebrick2") +
+  theme_minimal()
+
+
+```
+
+```{r}
+# Graph for HAVEUS
+
+ggplot(trend_data, aes(x = Year, y = Mean_haveus, color = as.factor(Treatment_Group), linetype = Pre_Post)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Pre and Post Trends for Respondent Having a Primary Care Provider",
+    x = "Year",
+    y = "Response to Having a Primary Care Provider (1 = Yes, 0 = No)",
+    color = "Treatment Group",
+    linetype = "Pre/Post"
+  ) + 
+  scale_color_manual(values = c("mediumblue", "deepskyblue1")) +
+  scale_color_manual(
+    values = c("mediumblue", "deepskyblue1"),
+    labels = c("Non-Medicaid", "Medicaid")  # Labeling groups manually
+  ) +
+  geom_vline(xintercept = 2014, linetype = "dotted", color = "black", size = 0.5) +
+  geom_text(aes(x = 2014, y = -Inf, label = "Medicaid Expansion"), 
+            angle = 0, hjust = 0.46, vjust = -0.5, size = 3, color = "firebrick2") +
+  theme_minimal()
+
+```
+
+```{r}
+# Graph for ADTCR
+
+ggplot(trend_data, aes(x = Year, y = Mean_appointment, color = as.factor(Treatment_Group), linetype = Pre_Post)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Pre and Post Trends for Respondent Having Made a Primary Care Appointment in 
+  Past Year",
+    x = "Year",
+    y = "Response to Making a PCP Appointment (1 = Yes, 0 = No)",
+    color = "Treatment Group",
+    linetype = "Pre/Post"
+  ) + 
+  scale_color_manual(values = c("mediumblue", "deepskyblue1")) +
+  scale_color_manual(
+    values = c("mediumblue", "deepskyblue1"),
+    labels = c("Non-Medicaid", "Medicaid")  # Labeling groups manually
+  ) +
+geom_vline(xintercept = 2014, linetype = "dotted", color = "black", size = 0.5) +
+  geom_text(aes(x = 2014, y = -Inf, label = "Medicaid Expansion"), 
+            angle = 0, hjust = 0.46, vjust = -0.5, size = 3, color = "firebrick2") +
+  theme_minimal()
+```
+
+
+**Regressions**
+
+
+```{r}
+# Naive Doctor Visits
+
+did_model_doctor_visits = lm(Number_Doctor_Visits ~ Treatment_Group * Pre_Post, data = meps_data)
+summary(did_model_doctor_visits)
+```
+
+```{r}
+# Naive Have Usual Source of Care
+did_model_haveus = lm(Have_Usual_Source_of_Care ~ Treatment_Group * Pre_Post, data = meps_data)
+summary(did_model_haveus)
+```
+
+```{r}
+# Naive Appointments
+did_model_appointment = lm(Made_Appointment_for_Routine_Care ~ Treatment_Group * Pre_Post, data = meps_data)
+summary(did_model_appointment)
+```
+
+```{r}
+# Robust Number of Doctor Visits
+
+robust_did_model_doctor_visits = lm(Number_Doctor_Visits ~ Treatment_Group * Pre_Post + relevel(factor(Region), ref = "South") + Age + Income + relevel(factor(Race), ref = "White") + relevel(factor(Sex), ref = "Male") + Years_of_Education + Employment_Status, data = meps_data)
+
+summary(robust_did_model_doctor_visits)
+
+```
+
+
+```{r}
+# Robust Have Usual Source of Care
+
+robust_did_model_haveus = lm(Have_Usual_Source_of_Care ~ Treatment_Group * Pre_Post + Treatment_Group * Pre_Post + relevel(factor(Region), ref = "South") + Age + Income + relevel(factor(Race), ref = "White") + relevel(factor(Sex), ref = "Male") + Years_of_Education + Employment_Status, data = meps_data)
+
+summary(robust_did_model_haveus)
+
+```
+
+
+```{r}
+# Robust Appointment
+
+robust_did_model_appointment = lm(Made_Appointment_for_Routine_Care ~ Treatment_Group * Pre_Post + Treatment_Group * Pre_Post + relevel(factor(Region), ref = "South") + Age + Income + relevel(factor(Race), ref = "White") + relevel(factor(Sex), ref = "Male") + Years_of_Education + Employment_Status, data = meps_data)
+
+summary(robust_did_model_appointment)
+```
+
+```{r}
+# Create Regression Output Table
+
+
+
+```
+
+```{r}
+stargazer(did_model_doctor_visits, type = "text")
+
+stargazer(robust_did_model_doctor_visits, type = "text")
+
+```
+
